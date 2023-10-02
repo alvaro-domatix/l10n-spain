@@ -319,12 +319,54 @@ class AccountStatementImport(models.TransientModel):
                     partner = partner_obj.search([("vat", "=", vat)])
         return partner
 
+    def _get_n43_partner_from_abanca(self, conceptos):
+        from difflib import SequenceMatcher
+
+        def find_best_match(target, candidates, threshold=0.6):
+            best_ratio = 0
+            best_match = None
+            best_chunk = None
+
+            words = target.split()
+            for candidate in candidates:
+                for i in range(len(words)):
+                    for j in range(i + 1, len(words) + 1):
+                        word_chunk = " ".join(words[i:j])
+                        ratio = SequenceMatcher(None, word_chunk.lower(), candidate.name.lower()).ratio()
+
+                        if ratio > best_ratio and ratio > threshold:
+                            best_ratio = ratio
+                            best_match = candidate
+                            best_chuck = word_chunk
+            return best_match, best_chuck if best_ratio > threshold else None
+
+        # Obtener los partners que son clientes o proveedores
+        partner_objs = self.env['res.partner'].search([])
+
+        # El texto extraído
+        extracted_text = conceptos["01"][0]
+
+
+        # Identificar si tu empresa está en el texto y eliminarla
+        my_company = self.env.user.company_id.name
+        best_match_company, best_match_chunk = find_best_match(extracted_text, [self.env.user.company_id],
+                                             threshold=0.9)  # Asumiendo que tu empresa tiene el ID 1
+        if best_match_company and best_match_chunk:
+            extracted_text = extracted_text.replace(best_match_chunk, '')
+
+        # Encontrar la mejor coincidencia entre los partners
+        best_match_partner, best_match_chunk = find_best_match(extracted_text, partner_objs, threshold=0.9)
+        return best_match_partner
+
     def _get_n43_partner(self, line):
         if not line.get("conceptos"):  # pragma: no cover
             return self.env["res.partner"]
         partner = self.env['account.bank.statement.line'].search([
             ('payment_ref', '=', line["conceptos"]["01"][0])
         ], limit=1).partner_id
+
+        if not partner:
+            partner = self._get_n43_partner_from_abanca(line["conceptos"])
         if not partner:
             partner = self._get_n43_partner_from_caixabank(line["conceptos"])
         if not partner:
