@@ -4,6 +4,7 @@
 import base64
 
 from odoo import fields
+from odoo.exceptions import UserError
 from odoo.tests import common
 from odoo.tools.misc import file_path
 
@@ -117,3 +118,19 @@ class L10nEsAccountStatementImportN43(common.TransactionCase):
             [("statement_id.journal_id", "=", self.journal.id)]
         )
         self.assertEqual(len(st_lines), 2)
+
+    def test_import_n43_twice_no_duplicates(self):
+        """Reimporting the same file does not create duplicated lines: the
+        already imported movements are skipped thanks to unique_import_id."""
+        self.import_wizard.import_file_button()
+        st_lines = self.env["account.bank.statement.line"].search(
+            [("statement_id.journal_id", "=", self.journal.id)]
+        )
+        self.assertEqual(len(st_lines), 3)
+        self.assertTrue(all(line.unique_import_id for line in st_lines))
+        with self.assertRaises(UserError):
+            self.import_wizard.import_file_button()
+        st_lines = self.env["account.bank.statement.line"].search(
+            [("statement_id.journal_id", "=", self.journal.id)]
+        )
+        self.assertEqual(len(st_lines), 3)
