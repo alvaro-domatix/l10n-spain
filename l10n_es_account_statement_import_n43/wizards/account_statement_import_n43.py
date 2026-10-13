@@ -325,16 +325,19 @@ class AccountStatementImport(models.TransientModel):
         if not line.get("conceptos") or journal.n43_partner_search == "none":
             return self.env["res.partner"]
         if journal.n43_partner_search == "all":
-            field = "n43_partner_search"
-            search_methods = set(x[0] for x in journal._fields[field].selection)
-            search_methods -= {"all", "none"}
+            selection = journal._fields["n43_partner_search"].selection
+            search_methods = [x[0] for x in selection if x[0] not in ("all", "none")]
         else:
             search_methods = [journal.n43_partner_search]
+        own_partner = journal.company_id.partner_id
         for search_method in search_methods:
             partner = getattr(self, f"_get_n43_partner_from_{search_method}")(
                 line["conceptos"]
             )
-            if partner:
+            # Never match the journal's own company (or a contact of it):
+            # the concept text may contain the company name (e.g. a transfer
+            # whose concept reads "Transfer <company name>").
+            if partner and partner.commercial_partner_id != own_partner:
                 return partner
         return self.env["res.partner"]
 
