@@ -367,16 +367,40 @@ class AccountStatementImport(models.TransientModel):
                 result.append(data)
         return result
 
+    def _get_n43_unique_import_id(self, line, seq):
+        """Build a stable unique import ID from the movement's natural key.
+
+        Reimporting the same file produces the same IDs, so the base import
+        machinery skips the already imported movements. The sequence number
+        disambiguates identical movements within the same file.
+        """
+        parts = [
+            line["fecha_oper"].strftime("%Y%m%d"),
+            line["fecha_valor"].strftime("%Y%m%d"),
+            line["of_origen"],
+            line["concepto_c"],
+            line["concepto_p"],
+            line["num_documento"],
+            line["referencia1"],
+            line["referencia2"],
+            f"{line['importe']:.2f}",
+            str(seq),
+        ]
+        return "-".join(parts)
+
     def _parse_single_file_n43(self, n43):
         transactions = []
+        seq = 0
         for group in n43:
             for line in group["lines"]:
+                seq += 1
                 conceptos = []
                 for concept_line in line["conceptos"]:
                     conceptos.extend(
                         x.strip() for x in line["conceptos"][concept_line] if x.strip()
                     )
                 vals_line = {
+                    "unique_import_id": self._get_n43_unique_import_id(line, seq),
                     "payment_ref": " ".join(conceptos)
                     or self._get_n43_ref(line)
                     or "/",
