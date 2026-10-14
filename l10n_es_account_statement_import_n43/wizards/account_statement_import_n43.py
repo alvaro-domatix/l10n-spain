@@ -480,13 +480,12 @@ class AccountStatementImport(models.TransientModel):
 
     def import_file_button(self):
         """Open a result dialog listing the skipped duplicates, if any."""
-        self._n43_skipped_movements = []
         result = self._import_file()
+        skipped = result.get("n43_skipped", [])
         action = self.env["ir.actions.actions"]._for_xml_id(
             "account.action_bank_statement_tree"
         )
         action["domain"] = [("id", "in", result["statement_ids"])]
-        skipped = self._n43_skipped_movements
         if not skipped:
             return action
         result_wizard = self.env["account.statement.import.n43.result"].create(
@@ -523,9 +522,7 @@ class AccountStatementImport(models.TransientModel):
         skipped = self._get_n43_skipped_movements(stmts_vals)
         res = super()._create_bank_statements(stmts_vals, result)
         if skipped:
-            self._n43_skipped_movements = (
-                getattr(self, "_n43_skipped_movements", []) + skipped
-            )
+            result.setdefault("n43_skipped", []).extend(skipped)
         return res
 
     def _get_n43_skipped_movements(self, stmts_vals):
