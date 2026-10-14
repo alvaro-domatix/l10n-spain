@@ -268,10 +268,19 @@ class L10nEsAccountStatementImportN43(common.TransactionCase):
             )
         )
         action = wiz_b.import_file_button()
-        # Every skipped movement is listed with the line it matches
-        message = action["params"]["message"]
-        self.assertIn(f"#{line_a.id}", message)
-        self.assertIn("100.00", message)
+        # The skipped movements are listed in a result dialog with the
+        # existing line each one matches
+        self.assertEqual(action["res_model"], "account.statement.import.n43.result")
+        result_wizard = self.env["account.statement.import.n43.result"].browse(
+            action["res_id"]
+        )
+        self.assertEqual(len(result_wizard.line_ids), 2)
+        self.assertIn(line_a.id, result_wizard.line_ids.matched_line_id.ids)
+        statements_action = result_wizard.action_view_statements()
+        self.assertEqual(
+            statements_action["domain"],
+            [("id", "in", result_wizard.statement_ids.ids)],
+        )
         st_lines = self.env["account.bank.statement.line"].search(
             [("statement_id.journal_id", "=", self.journal.id)]
         )

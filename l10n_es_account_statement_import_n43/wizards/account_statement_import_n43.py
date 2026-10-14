@@ -6,7 +6,7 @@ import logging
 import re
 from datetime import datetime
 
-from odoo import api, exceptions, fields, models
+from odoo import Command, api, exceptions, fields, models
 
 _logger = logging.getLogger(__name__)
 
@@ -478,16 +478,54 @@ class AccountStatementImport(models.TransientModel):
             st_vals["transactions"] = transactions
         return res
 
-    def _create_bank_statements(self, stmts_vals, result):
-        """List every skipped duplicate with the line it matches.
+    def import_file_button(self):
+        """Open a result dialog listing the skipped duplicates, if any."""
+        self._n43_skipped_movements = []
+        result = self._import_file()
+        action = self.env["ir.actions.actions"]._for_xml_id(
+            "account.action_bank_statement_tree"
+        )
+        action["domain"] = [("id", "in", result["statement_ids"])]
+        skipped = self._n43_skipped_movements
+        if not skipped:
+            return action
+        result_wizard = self.env["account.statement.import.n43.result"].create(
+            {
+                "statement_ids": [Command.set(result["statement_ids"])],
+                "line_ids": [
+                    Command.create(
+                        {
+                            "date": lvals.get("date"),
+                            "amount": lvals["amount"],
+                            "payment_ref": lvals.get("payment_ref"),
+                            "matched_line_id": existing.id,
+                        }
+                    )
+                    for lvals, existing in skipped
+                ],
+            }
+        )
+        return {
+            "type": "ir.actions.act_window",
+            "res_model": "account.statement.import.n43.result",
+            "res_id": result_wizard.id,
+            "view_mode": "form",
+            "target": "new",
+        }
 
-        The base method silently filters already imported transactions and
-        only reports a count. We add the detail so a false positive is
-        visible and traceable instead of going unnoticed."""
+    def _create_bank_statements(self, stmts_vals, result):
+        """Collect the skipped duplicates to list them in the result dialog.
+
+        The base method filters already imported transactions and only
+        reports a count in a toast notification, which is unreadable for a
+        list. We keep the detail so a false positive is visible and
+        traceable instead of going unnoticed."""
         skipped = self._get_n43_skipped_movements(stmts_vals)
         res = super()._create_bank_statements(stmts_vals, result)
         if skipped:
-            result["notifications"].append(self._get_n43_skipped_message(skipped))
+            self._n43_skipped_movements = (
+                getattr(self, "_n43_skipped_movements", []) + skipped
+            )
         return res
 
     def _get_n43_skipped_movements(self, stmts_vals):
@@ -506,31 +544,3 @@ class AccountStatementImport(models.TransientModel):
                 if existing:
                     skipped.append((lvals, existing))
         return skipped
-
-    def _get_n43_skipped_message(self, skipped):
-        lines = []
-        for lvals, existing in skipped[:10]:
-            if existing.statement_id:
-                match = self.env._(
-                    "statement %(name)s, line #%(line_id)d",
-                    name=existing.statement_id.name,
-                    line_id=existing.id,
-                )
-            else:
-                match = self.env._(
-                    "orphan line #%(line_id)d (its statement was deleted)",
-                    line_id=existing.id,
-                )
-            lines.append(
-                self.env._(
-                    "%(date)s · %(amount).2f EUR → already imported: %(match)s",
-                    date=lvals.get("date") or "",
-                    amount=lvals["amount"],
-                    match=match,
-                )
-            )
-        if len(skipped) > 10:
-            lines.append(self.env._("… and %(count)d more", count=len(skipped) - 10))
-        return (
-            self.env._("Already imported movements, skipped:") + "\n" + "\n".join(lines)
-        )
