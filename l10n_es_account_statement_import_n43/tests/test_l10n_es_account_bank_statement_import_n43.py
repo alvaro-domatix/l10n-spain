@@ -249,6 +249,7 @@ class L10nEsAccountStatementImportN43(common.TransactionCase):
             [("statement_id.journal_id", "=", self.journal.id)]
         )
         self.assertEqual(len(st_lines), 2)
+        line_a = st_lines.filtered(lambda line: line.amount == 100.0)
         # A second file covering a wider range repeats those movements at
         # different positions: only the new ones must be imported
         wider = [
@@ -266,7 +267,11 @@ class L10nEsAccountStatementImportN43(common.TransactionCase):
                 }
             )
         )
-        wiz_b.import_file_button()
+        action = wiz_b.import_file_button()
+        # Every skipped movement is listed with the line it matches
+        message = action["params"]["message"]
+        self.assertIn(f"#{line_a.id}", message)
+        self.assertIn("100.00", message)
         st_lines = self.env["account.bank.statement.line"].search(
             [("statement_id.journal_id", "=", self.journal.id)]
         )

@@ -477,3 +477,60 @@ class AccountStatementImport(models.TransientModel):
                 #     line_vals['raw_data'], journal).id
             st_vals["transactions"] = transactions
         return res
+
+    def _create_bank_statements(self, stmts_vals, result):
+        """List every skipped duplicate with the line it matches.
+
+        The base method silently filters already imported transactions and
+        only reports a count. We add the detail so a false positive is
+        visible and traceable instead of going unnoticed."""
+        skipped = self._get_n43_skipped_movements(stmts_vals)
+        res = super()._create_bank_statements(stmts_vals, result)
+        if skipped:
+            result["notifications"].append(self._get_n43_skipped_message(skipped))
+        return res
+
+    def _get_n43_skipped_movements(self, stmts_vals):
+        """Return [(incoming vals, existing line)] of the movements that the
+        import will skip because their unique_import_id already exists."""
+        absl_obj = self.env["account.bank.statement.line"].sudo()
+        skipped = []
+        for st_vals in stmts_vals:
+            for lvals in st_vals["transactions"]:
+                unique_import_id = lvals.get("unique_import_id")
+                if not unique_import_id:
+                    continue
+                existing = absl_obj.search(
+                    [("unique_import_id", "=", unique_import_id)], limit=1
+                )
+                if existing:
+                    skipped.append((lvals, existing))
+        return skipped
+
+    def _get_n43_skipped_message(self, skipped):
+        lines = []
+        for lvals, existing in skipped[:10]:
+            if existing.statement_id:
+                match = self.env._(
+                    "statement %(name)s, line #%(line_id)d",
+                    name=existing.statement_id.name,
+                    line_id=existing.id,
+                )
+            else:
+                match = self.env._(
+                    "orphan line #%(line_id)d (its statement was deleted)",
+                    line_id=existing.id,
+                )
+            lines.append(
+                self.env._(
+                    "%(date)s · %(amount).2f EUR → already imported: %(match)s",
+                    date=lvals.get("date") or "",
+                    amount=lvals["amount"],
+                    match=match,
+                )
+            )
+        if len(skipped) > 10:
+            lines.append(self.env._("… and %(count)d more", count=len(skipped) - 10))
+        return (
+            self.env._("Already imported movements, skipped:") + "\n" + "\n".join(lines)
+        )
