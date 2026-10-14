@@ -274,3 +274,22 @@ class L10nEsAccountStatementImportN43(common.TransactionCase):
         self.assertEqual(
             sorted(st_lines.mapped("amount")), [-200.0, 50.0, 100.0, 300.0]
         )
+
+    def test_import_n43_identical_movements_rejected(self):
+        """A file with two fully identical movements is rejected with a
+        clear message instead of crashing on the unique constraint."""
+        twin = {
+            "fecha": "260815",
+            "ref": "REFT",
+            "amount": 100.0,
+            "concept": "CONCEPT T",
+        }
+        self.import_wizard.statement_file = base64.b64encode(
+            _build_n43_file([twin, dict(twin)]).encode()
+        )
+        with self.assertRaises(UserError):
+            self.import_wizard.import_file_button()
+        st_lines = self.env["account.bank.statement.line"].search(
+            [("statement_id.journal_id", "=", self.journal.id)]
+        )
+        self.assertFalse(st_lines)

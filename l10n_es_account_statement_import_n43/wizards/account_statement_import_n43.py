@@ -388,22 +388,28 @@ class AccountStatementImport(models.TransientModel):
 
     def _parse_single_file_n43(self, n43):
         transactions = []
-        key_occurrences = {}
+        seen_keys = set()
         for group in n43:
             for line in group["lines"]:
                 key = self._get_n43_movement_key(line)
-                key_occurrences[key] = key_occurrences.get(key, 0) + 1
+                if key in seen_keys:
+                    raise exceptions.UserError(
+                        self.env._(
+                            "The file contains two identical movements (%(date)s, "
+                            "%(amount).2f EUR). They cannot be told apart, so "
+                            "nothing has been imported. Review or split the file.",
+                            date=line["fecha_valor"].strftime("%d/%m/%Y"),
+                            amount=line["importe"],
+                        )
+                    )
+                seen_keys.add(key)
                 conceptos = []
                 for concept_line in line["conceptos"]:
                     conceptos.extend(
                         x.strip() for x in line["conceptos"][concept_line] if x.strip()
                     )
                 vals_line = {
-                    # Occurrence index of this movement within the file, so
-                    # identical movements in the same file don't collide.
-                    # Unlike the absolute row position, it stays stable for a
-                    # movement whatever other movements the file contains.
-                    "unique_import_id": f"{key}-{key_occurrences[key]}",
+                    "unique_import_id": key,
                     "payment_ref": " ".join(conceptos)
                     or self._get_n43_ref(line)
                     or "/",
