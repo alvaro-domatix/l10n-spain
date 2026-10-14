@@ -364,13 +364,12 @@ class AccountStatementImport(models.TransientModel):
                 result.append(data)
         return result
 
-    def _get_n43_unique_import_id(self, line, seq):
-        """Build a stable unique import ID from the movement's natural key.
+    def _get_n43_movement_key(self, line):
+        """Natural key of an N43 movement, stable across files.
 
-        Reimporting the same file produces the same IDs, so the base import
-        machinery skips the already imported movements. The sequence number
-        disambiguates identical movements within the same file.
-        """
+        Built from the movement record fields, so the same movement keeps
+        its key even when it arrives in a different file (e.g. overlapping
+        statement ranges)."""
         parts = [
             line["fecha_oper"].strftime("%Y%m%d"),
             line["fecha_valor"].strftime("%Y%m%d"),
@@ -381,23 +380,27 @@ class AccountStatementImport(models.TransientModel):
             line["referencia1"],
             line["referencia2"],
             f"{line['importe']:.2f}",
-            str(seq),
         ]
         return "-".join(parts)
 
     def _parse_single_file_n43(self, n43):
         transactions = []
-        seq = 0
+        key_occurrences = {}
         for group in n43:
             for line in group["lines"]:
-                seq += 1
+                key = self._get_n43_movement_key(line)
+                key_occurrences[key] = key_occurrences.get(key, 0) + 1
                 conceptos = []
                 for concept_line in line["conceptos"]:
                     conceptos.extend(
                         x.strip() for x in line["conceptos"][concept_line] if x.strip()
                     )
                 vals_line = {
-                    "unique_import_id": self._get_n43_unique_import_id(line, seq),
+                    # Occurrence index of this movement within the file, so
+                    # identical movements in the same file don't collide.
+                    # Unlike the absolute row position, it stays stable for a
+                    # movement whatever other movements the file contains.
+                    "unique_import_id": f"{key}-{key_occurrences[key]}",
                     "payment_ref": " ".join(conceptos)
                     or self._get_n43_ref(line)
                     or "/",

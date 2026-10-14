@@ -9,6 +9,72 @@ from odoo.tests import common
 from odoo.tools.misc import file_path
 
 
+def _build_n43_file(movements):
+    """Build a minimal valid N43 file with the given movements.
+
+    Each movement is a dict with keys: fecha (yymmdd string), ref
+    (referencia2), amount (float, negative for debits) and concept (free
+    text of the concept record).
+    """
+    header = (
+        "11"  # record code
+        "2080"  # entidad
+        "0646"  # oficina
+        + "0" * 10  # cuenta
+        + "260801260831"  # fecha_ini + fecha_fin
+        + "2"  # saldo_ini sign
+        + "0" * 12
+        + "00"  # saldo_ini = 0 (skips the group balance check)
+        + "978"  # divisa EUR
+        + "2"  # modalidad
+        + "TEST BUILDER N43".ljust(26)
+    )
+    lines = [header]
+    debit_count = 0
+    debit_cents = 0
+    credit_count = 0
+    credit_cents = 0
+    for mov in movements:
+        cents = round(abs(mov["amount"]) * 100)
+        if mov["amount"] < 0:
+            debit_count += 1
+            debit_cents += cents
+            sign = "1"
+        else:
+            credit_count += 1
+            credit_cents += cents
+            sign = "0"
+        lines.append(
+            "22"
+            + " " * 4
+            + "0646"  # oficina origen
+            + mov["fecha"]  # fecha_oper
+            + mov["fecha"]  # fecha_valor
+            + "05"  # concepto común
+            + "010"  # concepto propio
+            + sign
+            + f"{cents // 100:012d}{cents % 100:02d}"
+            + " " * 10  # num_documento
+            + " " * 12  # referencia1
+            + mov["ref"]  # referencia2
+        )
+        lines.append("2301" + mov["concept"].ljust(35))
+    lines.append(
+        "33"
+        + "0" * 18
+        + f"{debit_count:05d}"
+        + f"{debit_cents // 100:012d}{debit_cents % 100:02d}"
+        + f"{credit_count:05d}"
+        + f"{credit_cents // 100:012d}{credit_cents % 100:02d}"
+        + "2"  # saldo_fin sign
+        + "0" * 12
+        + "00"  # saldo_fin = 0 (skips the group balance check)
+    )
+    total = len(lines) + 1  # including this record 88
+    lines.append("88" + "9" * 18 + f"{total:06d}")
+    return "\n".join(lines)
+
+
 class L10nEsAccountStatementImportN43(common.TransactionCase):
     @classmethod
     def setUpClass(cls):
@@ -134,3 +200,42 @@ class L10nEsAccountStatementImportN43(common.TransactionCase):
             [("statement_id.journal_id", "=", self.journal.id)]
         )
         self.assertEqual(len(st_lines), 3)
+
+    def test_import_n43_overlapping_files_no_duplicates(self):
+        """Movements arriving again in a file with different composition
+        (overlapping date ranges) are skipped, whatever their position."""
+        movements = [
+            {"fecha": "260815", "ref": "REFA", "amount": 100.0, "concept": "CONCEPT A"},
+            {"fecha": "260816", "ref": "REFB", "amount": -200.0, "concept": "CONCEPT B"},
+        ]
+        self.import_wizard.statement_file = base64.b64encode(
+            _build_n43_file(movements).encode()
+        )
+        self.import_wizard.import_file_button()
+        st_lines = self.env["account.bank.statement.line"].search(
+            [("statement_id.journal_id", "=", self.journal.id)]
+        )
+        self.assertEqual(len(st_lines), 2)
+        # A second file covering a wider range repeats those movements at
+        # different positions: only the new ones must be imported
+        wider = [
+            {"fecha": "260710", "ref": "REFX", "amount": 50.0, "concept": "CONCEPT X"},
+            *movements,
+            {"fecha": "260901", "ref": "REFC", "amount": 300.0, "concept": "CONCEPT C"},
+        ]
+        wiz_b = self.env["account.statement.import"].with_context(
+            journal_id=self.journal.id
+        ).create(
+            {
+                "statement_file": base64.b64encode(_build_n43_file(wider).encode()),
+                "statement_filename": "overlap.n43",
+            }
+        )
+        wiz_b.import_file_button()
+        st_lines = self.env["account.bank.statement.line"].search(
+            [("statement_id.journal_id", "=", self.journal.id)]
+        )
+        self.assertEqual(len(st_lines), 4)
+        self.assertEqual(
+            sorted(st_lines.mapped("amount")), [-200.0, 50.0, 100.0, 300.0]
+        )
