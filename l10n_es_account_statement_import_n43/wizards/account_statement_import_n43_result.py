@@ -1,6 +1,8 @@
 # Copyright 2026 Domatix
 # License AGPL-3.0 or later (http://www.gnu.org/licenses/agpl).
 
+import json
+
 from odoo import fields, models
 
 
@@ -9,10 +11,13 @@ class AccountStatementImportN43Result(models.TransientModel):
     _description = "N43 import result"
 
     statement_ids = fields.Many2many("account.bank.statement")
+    next_action = fields.Text()
     line_ids = fields.One2many("account.statement.import.n43.result.line", "wizard_id")
 
-    def action_view_statements(self):
+    def action_continue(self):
         self.ensure_one()
+        if self.next_action:
+            return json.loads(self.next_action)
         action = self.env["ir.actions.actions"]._for_xml_id(
             "account.action_bank_statement_tree"
         )
