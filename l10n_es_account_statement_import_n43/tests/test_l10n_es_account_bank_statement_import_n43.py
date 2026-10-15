@@ -251,7 +251,7 @@ class L10nEsAccountStatementImportN43(common.TransactionCase):
         statements_action = result_wizard.action_continue()
         self.assertEqual(
             statements_action["domain"],
-            [("id", "in", result_wizard.statement_ids.ids)],
+            [["id", "in", result_wizard.statement_ids.ids]],
         )
         st_lines = self.env["account.bank.statement.line"].search(
             [("statement_id.journal_id", "=", self.journal.id)]
