@@ -276,7 +276,7 @@ class L10nEsAccountStatementImportN43(common.TransactionCase):
         )
         self.assertEqual(len(result_wizard.line_ids), 2)
         self.assertIn(line_a.id, result_wizard.line_ids.matched_line_id.ids)
-        statements_action = result_wizard.action_view_statements()
+        statements_action = result_wizard.action_continue()
         self.assertEqual(
             statements_action["domain"],
             [("id", "in", result_wizard.statement_ids.ids)],
@@ -287,6 +287,46 @@ class L10nEsAccountStatementImportN43(common.TransactionCase):
         self.assertEqual(len(st_lines), 4)
         self.assertEqual(
             sorted(st_lines.mapped("amount")), [-200.0, 50.0, 100.0, 300.0]
+        )
+
+    def test_import_n43_reconcile_button_overlap(self):
+        """The "Import and Reconcile" button also opens the result dialog."""
+        try:
+            self.env["ir.actions.actions"]._for_xml_id(
+                "account_reconcile_oca.action_bank_statement_line_reconcile"
+            )
+        except ValueError:
+            self.skipTest("account_reconcile_oca is not installed")
+        movements = [
+            {"fecha": "260815", "ref": "REFA", "amount": 100.0, "concept": "CONCEPT A"},
+        ]
+        self.import_wizard.statement_file = base64.b64encode(
+            _build_n43_file(movements).encode()
+        )
+        self.import_wizard.import_file_and_reconcile_button()
+        wider = [
+            *movements,
+            {"fecha": "260901", "ref": "REFC", "amount": 300.0, "concept": "CONCEPT C"},
+        ]
+        wiz_b = (
+            self.env["account.statement.import"]
+            .with_context(journal_id=self.journal.id)
+            .create(
+                {
+                    "statement_file": base64.b64encode(_build_n43_file(wider).encode()),
+                    "statement_filename": "overlap2.n43",
+                }
+            )
+        )
+        action = wiz_b.import_file_and_reconcile_button()
+        self.assertEqual(action["res_model"], "account.statement.import.n43.result")
+        result_wizard = self.env["account.statement.import.n43.result"].browse(
+            action["res_id"]
+        )
+        self.assertEqual(len(result_wizard.line_ids), 1)
+        continue_action = result_wizard.action_continue()
+        self.assertEqual(
+            continue_action["context"]["default_journal_id"], self.journal.id
         )
 
     def test_import_n43_identical_movements_rejected(self):

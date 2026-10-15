@@ -2,6 +2,7 @@
 # Copyright 2021 Tecnativa - Carlos Roca
 # License AGPL-3.0 or later (http://www.gnu.org/licenses/agpl).
 
+import json
 import logging
 import re
 from datetime import datetime
@@ -479,18 +480,41 @@ class AccountStatementImport(models.TransientModel):
         return res
 
     def import_file_button(self):
-        """Open a result dialog listing the skipped duplicates, if any."""
+        """Import and show the statements, or the skipped-duplicates dialog."""
         result = self._import_file()
-        skipped = result.get("n43_skipped", [])
         action = self.env["ir.actions.actions"]._for_xml_id(
             "account.action_bank_statement_tree"
         )
         action["domain"] = [("id", "in", result["statement_ids"])]
+        return self._n43_result_action(result, action)
+
+    def import_file_and_reconcile_button(self):
+        """Import and jump to the reconciliation widget, or the dialog.
+
+        Mirrors the button added by account_statement_import_file_reconcile_oca
+        so the skipped-duplicates dialog also covers that entry point."""
+        result = self._import_file()
+        action = self.env["ir.actions.actions"]._for_xml_id(
+            "account_reconcile_oca.action_bank_statement_line_reconcile"
+        )
+        action["context"] = {
+            "default_journal_id": self.env.context.get("journal_id"),
+            "active_id": self.env.context.get("journal_id"),
+            "search_default_not_reconciled": True,
+            "view_ref": "account_reconcile_oca.bank_statement_line_form_reconcile_view",
+        }
+        return self._n43_result_action(result, action)
+
+    def _n43_result_action(self, result, next_action):
+        """Return ``next_action``, or the result dialog when the import
+        skipped duplicated movements."""
+        skipped = result.get("n43_skipped", [])
         if not skipped:
-            return action
+            return next_action
         result_wizard = self.env["account.statement.import.n43.result"].create(
             {
                 "statement_ids": [Command.set(result["statement_ids"])],
+                "next_action": json.dumps(next_action),
                 "line_ids": [
                     Command.create(
                         {

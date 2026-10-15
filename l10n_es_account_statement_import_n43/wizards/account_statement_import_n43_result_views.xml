@@ -28,8 +28,8 @@
                 </sheet>
                 <footer>
                     <button
-                        name="action_view_statements"
-                        string="View statements"
+                        name="action_continue"
+                        string="Continue"
                         type="object"
                         class="btn-primary"
                     />
