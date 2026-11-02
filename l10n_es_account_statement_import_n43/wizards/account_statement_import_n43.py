@@ -2,7 +2,7 @@
 # Copyright 2021 Tecnativa - Carlos Roca
 # License AGPL-3.0 or later (http://www.gnu.org/licenses/agpl).
 
-import json
+import base64
 import logging
 import re
 from datetime import datetime
@@ -365,12 +365,22 @@ class AccountStatementImport(models.TransientModel):
                 result.append(data)
         return result
 
+    def _get_n43_concepts_text(self, line):
+        return " ".join(
+            text.strip()
+            for texts in line["conceptos"].values()
+            for text in texts
+            if text.strip()
+        )
+
     def _get_n43_movement_key(self, line):
         """Natural key of an N43 movement, stable across files.
 
-        Built from the movement record fields, so the same movement keeps
-        its key even when it arrives in a different file (e.g. overlapping
-        statement ranges)."""
+        Built from the movement record fields and its complementary concept
+        records, so the same movement keeps its key even when it arrives in a
+        different file (e.g. overlapping statement ranges), while movements
+        sharing the main record (e.g. two payrolls of the same amount on the
+        same day) are told apart by their concepts."""
         parts = [
             line["fecha_oper"].strftime("%Y%m%d"),
             line["fecha_valor"].strftime("%Y%m%d"),
@@ -382,33 +392,28 @@ class AccountStatementImport(models.TransientModel):
             line["referencia2"],
             f"{line['importe']:.2f}",
         ]
+        concepts = self._get_n43_concepts_text(line)
+        if concepts:
+            parts.append(concepts)
         return "-".join(parts)
 
     def _parse_single_file_n43(self, n43):
         transactions = []
-        seen_keys = set()
+        occurrences = {}
         for group in n43:
             for line in group["lines"]:
                 key = self._get_n43_movement_key(line)
-                if key in seen_keys:
-                    raise exceptions.UserError(
-                        self.env._(
-                            "The file contains two identical movements (%(date)s, "
-                            "%(amount).2f EUR). They cannot be told apart, so "
-                            "nothing has been imported. Review or split the file.",
-                            date=line["fecha_valor"].strftime("%d/%m/%Y"),
-                            amount=line["importe"],
-                        )
-                    )
-                seen_keys.add(key)
-                conceptos = []
-                for concept_line in line["conceptos"]:
-                    conceptos.extend(
-                        x.strip() for x in line["conceptos"][concept_line] if x.strip()
-                    )
+                occurrence = occurrences[key] = occurrences.get(key, 0) + 1
                 vals_line = {
-                    "unique_import_id": key,
-                    "payment_ref": " ".join(conceptos)
+                    # Identical movements in the same file are numbered, so the
+                    # first one keeps the bare key whatever the file contains
+                    "unique_import_id": key
+                    if occurrence == 1
+                    else f"{key}-{occurrence}",
+                    # removed before creating the record, see
+                    # _create_bank_statements
+                    "n43_occurrence": occurrence,
+                    "payment_ref": self._get_n43_concepts_text(line)
                     or self._get_n43_ref(line)
                     or "/",
                     "ref": self._get_n43_ref(line),
@@ -477,88 +482,121 @@ class AccountStatementImport(models.TransientModel):
         return res
 
     def import_file_button(self):
-        """Import and show the statements, or the skipped-duplicates dialog."""
-        result = self._import_file()
-        action = self.env["ir.actions.actions"]._for_xml_id(
-            "account.action_bank_statement_tree"
-        )
-        action["domain"] = [("id", "in", result["statement_ids"])]
-        return self._n43_result_action(result, action)
+        """Ask the user about the possible duplicates before importing."""
+        return self._n43_review_action("statements") or super().import_file_button()
 
     def import_file_and_reconcile_button(self):
-        """Import and jump to the reconciliation widget, or the dialog.
-
-        Mirrors the button added by account_statement_import_file_reconcile_oca
-        so the skipped-duplicates dialog also covers that entry point."""
-        result = self._import_file()
-        action = self.env["ir.actions.actions"]._for_xml_id(
-            "account_reconcile_oca.action_bank_statement_line_reconcile"
+        """Same review for the button of account_statement_import_file_reconcile_oca."""
+        return (
+            self._n43_review_action("reconcile")
+            or super().import_file_and_reconcile_button()
         )
-        action["context"] = {
-            "default_journal_id": self.env.context.get("journal_id"),
-            "active_id": self.env.context.get("journal_id"),
-            "search_default_not_reconciled": True,
-            "view_ref": "account_reconcile_oca.bank_statement_line_form_reconcile_view",
-        }
-        return self._n43_result_action(result, action)
 
-    def _n43_result_action(self, result, next_action):
-        """Return ``next_action``, or the result dialog when the import
-        skipped duplicated movements."""
-        skipped = result.get("n43_skipped", [])
-        if not skipped:
-            return next_action
-        result_wizard = self.env["account.statement.import.n43.result"].create(
+    def _n43_review_action(self, mode):
+        """Return the review dialog when the file carries possible duplicates.
+
+        A first pass parses the file without creating anything. If some
+        movement was already imported, or is repeated within the file, the user
+        decides which ones are real duplicates before the actual import."""
+        self.ensure_one()
+        if "n43_duplicate_decisions" in self.env.context:
+            return False
+        result = {"statement_ids": [], "notifications": []}
+        self.with_context(n43_dry_run=True).import_single_file(
+            base64.b64decode(self.statement_file), result
+        )
+        suspects = result.get("n43_suspects")
+        if not suspects:
+            return False
+        review = self.env["account.statement.import.n43.result"].create(
             {
-                "statement_ids": [Command.set(result["statement_ids"])],
-                "next_action": json.dumps(next_action),
-                "line_ids": [
-                    Command.create(
-                        {
-                            "date": lvals.get("date"),
-                            "amount": lvals["amount"],
-                            "payment_ref": lvals.get("payment_ref"),
-                            "matched_line_id": existing.id,
-                        }
-                    )
-                    for lvals, existing in skipped
-                ],
+                "import_wizard_id": self.id,
+                "mode": mode,
+                "line_ids": [Command.create(vals) for vals in suspects],
             }
         )
         return {
             "type": "ir.actions.act_window",
+            "name": self.env._("Possible duplicates"),
             "res_model": "account.statement.import.n43.result",
-            "res_id": result_wizard.id,
+            "res_id": review.id,
             "view_mode": "form",
             "target": "new",
+            "context": self.env.context,
         }
 
     def _create_bank_statements(self, stmts_vals, result):
-        """Collect the skipped duplicates to list them in the result dialog.
+        """Apply the user's decisions on the possible duplicates.
 
-        The base method filters already imported transactions and only
-        reports a count in a toast notification, which is unreadable for a
-        list. We keep the detail so a false positive is visible and
-        traceable instead of going unnoticed."""
-        skipped = self._get_n43_skipped_movements(stmts_vals)
-        res = super()._create_bank_statements(stmts_vals, result)
-        if skipped:
-            result.setdefault("n43_skipped", []).extend(skipped)
-        return res
-
-    def _get_n43_skipped_movements(self, stmts_vals):
-        """Return [(incoming vals, existing line)] of the movements that the
-        import will skip because their unique_import_id already exists."""
+        A movement already imported is skipped by default (the base method
+        does it through its unique_import_id). A movement repeated within the
+        same file is imported by default, as a bank doesn't list the same
+        movement twice in one statement. The user can revert both."""
+        decisions = self.env.context.get("n43_duplicate_decisions") or {}
         absl_obj = self.env["account.bank.statement.line"].sudo()
-        skipped = []
+        used_ids = {
+            lvals.get("unique_import_id")
+            for st_vals in stmts_vals
+            for lvals in st_vals["transactions"]
+        }
+        suspects = []
         for st_vals in stmts_vals:
+            transactions = []
             for lvals in st_vals["transactions"]:
+                occurrence = lvals.pop("n43_occurrence", None)
                 unique_import_id = lvals.get("unique_import_id")
-                if not unique_import_id:
-                    continue
-                existing = absl_obj.search(
-                    [("unique_import_id", "=", unique_import_id)], limit=1
+                existing = (
+                    occurrence
+                    and unique_import_id
+                    and absl_obj.search(
+                        [("unique_import_id", "=", unique_import_id)], limit=1
+                    )
                 )
-                if existing:
-                    skipped.append((lvals, existing))
-        return skipped
+                if not existing and (not occurrence or occurrence == 1):
+                    transactions.append(lvals)
+                    continue
+                is_duplicate = decisions.get(unique_import_id, bool(existing))
+                suspects.append(
+                    {
+                        "unique_import_id": unique_import_id,
+                        "reason": "imported" if existing else "repeated",
+                        "is_duplicate": is_duplicate,
+                        "date": lvals.get("date"),
+                        "amount": lvals["amount"],
+                        "payment_ref": lvals.get("payment_ref"),
+                        "matched_line_id": existing and existing.id,
+                    }
+                )
+                if existing and not is_duplicate:
+                    lvals["unique_import_id"] = self._n43_free_unique_import_id(
+                        unique_import_id, occurrence, used_ids
+                    )
+                elif not existing and is_duplicate:
+                    # Same balance handling as the base method for skipped lines
+                    if "balance_start" in st_vals:
+                        st_vals["balance_start"] += float(lvals["amount"])
+                    continue
+                transactions.append(lvals)
+            st_vals["transactions"] = transactions
+        if self.env.context.get("n43_dry_run"):
+            result.setdefault("n43_suspects", []).extend(suspects)
+            return False
+        return super()._create_bank_statements(stmts_vals, result)
+
+    def _n43_free_unique_import_id(self, unique_import_id, occurrence, used_ids):
+        """Next free occurrence of the movement, for one the user imports
+        although its unique_import_id already exists."""
+        base_id = (
+            unique_import_id
+            if occurrence == 1
+            else unique_import_id[: -len(f"-{occurrence}")]
+        )
+        absl_obj = self.env["account.bank.statement.line"].sudo()
+        number = 2
+        while f"{base_id}-{number}" in used_ids or absl_obj.search_count(
+            [("unique_import_id", "=", f"{base_id}-{number}")], limit=1
+        ):
+            number += 1
+        free_id = f"{base_id}-{number}"
+        used_ids.add(free_id)
+        return free_id
